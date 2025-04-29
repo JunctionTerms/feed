@@ -191,32 +191,9 @@ runs:
       id: variables
       shell: bash
       env:
+        IMAGE_NAME: "${{ inputs.image_name }}"
+        HUB_USERNAME: "${{ inputs.hub_username }}"
+        HUB_PASSWORD: "${{ inputs.hub_password }}"
         MAX_DELETIONS: 15
       run: |
-        echo "Fetching manifests to delete..."
-        HUB_TOKEN=$(curl -s -H "Content-Type: application/json" -X POST \
-          -d "{\"username\": \"${{ inputs.hub_username }}\", \"password\": \"${{ inputs.hub_password }}\"}" \
-          https://hub.docker.com/v2/users/login/ | jq -r .token)
-        [ -z "$HUB_TOKEN" ] && { echo "❌ Authentication failed"; exit 1; }
-
-        MANIFESTS=$(curl -s -H "Authorization: JWT $HUB_TOKEN" \
-          "https://hub.docker.com/v2/repositories/${{ inputs.image_name }}/tags/?page_size=${{ env.MAX_DELETIONS }}&ordering=last_updated" \
-          | jq -r '.results[] | select(.images != null) | .images[].digest' \
-          | sort | uniq | head -n ${{ env.MAX_DELETIONS }})
-
-        DELETED_MANIFESTS=0
-        for SHA in $MANIFESTS; do
-          echo "Deleting manifest ${SHA:0:12}..."
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
-            -H "Authorization: JWT $HUB_TOKEN" \
-            "https://hub.docker.com/v2/repositories/${{ inputs.image_name }}/manifests/$SHA")
-      
-          if [ "$RESPONSE" -eq 202 ]; then
-            ((DELETED_MANIFESTS++))
-            echo "✅ Deleted manifest"
-            sleep 1
-          else
-            echo "❌ Failed to delete (HTTP $RESPONSE)"
-          fi
-        done
-        echo "Deleted manifests: $DELETED_MANIFESTS"
+        ./.github/entrypoint/remote.sh
