@@ -1,48 +1,65 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Authenticate
+echo "Fetching manifests to delete..."
 HUB_TOKEN=$(curl -s -H "Content-Type: application/json" -X POST \
-  -d "{\"username\": \"$HUB_USERNAME\", \"password\": \"$HUB_PASSWORD\"}" \
+  -d "{\"username\": \"${HUB_USERNAME}\", \"password\": \"${HUB_PASSWORD}\"}" \
   https://hub.docker.com/v2/users/login/ | jq -r .token)
+[ -z "$HUB_TOKEN" ] && { echo "❌ Authentication failed"; exit 1; }
 
-[ -z "$HUB_TOKEN" ] && { echo "❌ Auth failed"; exit 1; }
+MANIFESTS=$(curl -s -H "Authorization: JWT $HUB_TOKEN" \
+  "https://hub.docker.com/v2/repositories/${IMAGE_NAME}/tags/?page_size=${MAX_DELETIONS}&ordering=last_updated" \
+  | jq -r '.results[] | select(.images != null) | .images[].digest' \
+  | sort | uniq | head -n $MAX_DELETIONS)
 
-# Get manifests with tags
-RESPONSE=$(curl -s -H "Authorization: JWT $HUB_TOKEN" \
-  "https://hub.docker.com/v2/repositories/$IMAGE_NAME/tags/?page_size=$MAX_DELETIONS&ordering=last_updated")
-
-# Process deletions
-DELETED=0
-echo "$RESPONSE" | jq -c '.results[]' | while read -r ITEM; do
-  TAG=$(echo "$ITEM" | jq -r '.name')
-  DIGEST=$(echo "$ITEM" | jq -r '.images[0].digest')
+DELETED_MANIFESTS=0
+for SHA in $MANIFESTS; do
+  echo "Processing manifest ${SHA:0:12}..."
   
-  echo "Processing ${DIGEST:7:12} (tag: ${TAG:-none})..."
+  # 1. Extract clean SHA256 (remove 'sha256:' prefix if present)
+  CLEAN_SHA="${SHA#sha256:}"
   
-  # Delete tag if exists
-  if [ "$TAG" != "null" ]; then
-    echo "  Deleting tag..."
-    curl -s -o /dev/null -X DELETE \
-      -H "Authorization: JWT $HUB_TOKEN" \
-      "https://hub.docker.com/v2/namespaces/${IMAGE_NAME%/*}/repositories/${IMAGE_NAME#*/}/tags/$TAG"
+  # 2. Get the manifest reference first (required for Docker Hub)
+  echo "Getting manifest reference..."
+  MANIFEST_REF=$(curl -s -H "Authorization: JWT $HUB_TOKEN" \
+    -H "Accept: application/json" \
+    "https://hub.docker.com/v2/repositories/$IMAGE_NAME/tags/?digest=sha256:$CLEAN_SHA" \
+    | jq -r '.results[0].name')
+  
+  if [ -z "$MANIFEST_REF" ] || [ "$MANIFEST_REF" = "null" ]; then
+    echo "⚠️ No tag reference found for this digest"
+    continue
   fi
   
-  # Delete manifest
-  echo "  Deleting manifest..."
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+  # 3. Delete using the tag reference
+  DELETE_URL="https://hub.docker.com/v2/namespaces/${IMAGE_NAME%/*}/repositories/${IMAGE_NAME#*/}/tags/$MANIFEST_REF"
+  echo "Deleting via tag reference: $MANIFEST_REF"
+  
+  RESPONSE=$(curl -v -s -o /dev/null -w "%{http_code}" -X DELETE \
     -H "Authorization: JWT $HUB_TOKEN" \
-    -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
-    "https://hub.docker.com/v2/repositories/$IMAGE_NAME/manifests/$DIGEST")
+    -H "Accept: application/json" \
+    "$DELETE_URL")
   
-  if [ "$STATUS" -eq 202 ]; then
-    ((DELETED++))
-    echo "  ✅ Deleted"
+  # 4. Check response
+  if [ "$RESPONSE" -eq 204 ]; then
+    ((DELETED_MANIFESTS++))
+    echo "✅ Successfully deleted via tag reference"
   else
-    echo "  ❌ Failed (HTTP $STATUS)"
+    echo "❌ Failed to delete (HTTP $RESPONSE)"
+    # Fallback to direct manifest delete
+    echo "Attempting direct manifest delete..."
+    RESPONSE=$(curl -v -s -o /dev/null -w "%{http_code}" -X DELETE \
+      -H "Authorization: JWT $HUB_TOKEN" \
+      -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+      "https://hub.docker.com/v2/repositories/$IMAGE_NAME/manifests/sha256:$CLEAN_SHA")
+    
+    if [ "$RESPONSE" -eq 202 ]; then
+      ((DELETED_MANIFESTS++))
+      echo "✅ Successfully deleted via direct manifest"
+    else
+      echo "❌ Fallback failed (HTTP $RESPONSE)"
+    fi
   fi
   
-  sleep 2
-  [ $DELETED -ge $MAX_DELETIONS ] && break
+  sleep 3
 done
-
-echo "Total deleted: $DELETED/$MAX_DELETIONS"
+echo "Total manifests deleted: $DELETED_MANIFESTS/$MAX_DELETIONS"
