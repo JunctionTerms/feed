@@ -92,20 +92,15 @@ runs:
       run: |
         if [[ '${{ inputs.failure_status }}' == 'true' ]]; then
       
-          git config --global user.name "$GITHUB_ACTOR"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global user.email "$GITHUB_ACTOR@users.noreply.github.com"
-
-          REMOTE_REPO="https://$GITHUB_ACTOR:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
-          git clone --single-branch --branch gh-pages $REMOTE_REPO gh-pages && cd gh-pages
-          git add . && git commit --allow-empty -m "rerun due to job failure" && git push
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/dispatches" \
+            -d '{"event_type": "retry_workflow", "client_payload": {"original_run_id": "$GITHUB_RUN_ID"}}'
+            echo -e "Rerun workflow since there is failure happen on the previous jobs"
+          exit 1
   
         else
-
-          cd ${GITHUB_WORKSPACE//\\//}
-
-          echo -e "\n$hr\nConfig\n$hr"
-          cat _config.yml
 
           echo -e "\n$hr\nSource Pages\n$hr"
           rm -rf _user && ls -al .
@@ -133,9 +128,6 @@ runs:
           # Debug output to verify
           echo "Original: $LATEST_COMMIT"
           echo "Processed: $MESSAGE"
-
-          # Commit and push changes
-          git add . && git commit --allow-empty -m "$MESSAGE" && git push
 
           echo -e "\n$hr\nFinal Status\n$hr"
           # Fetch all branches
@@ -165,7 +157,7 @@ runs:
             git commit --allow-empty -m "Update GitHub workflows and configurations"
             git push origin v0
 
-            #Change the setting of default brance
+            #Change the setting of default branch
             curl -s -X PATCH \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
@@ -174,12 +166,15 @@ runs:
             echo "Created v0 branch and set it as default"
           fi
 
+          # Commit and push changes
+          git add . && git commit --allow-empty -m "$MESSAGE" && git push
+
           if [[ "$TARGET_REPOSITORY" != *"eq19/"* ]]; then
             # Unpublish existing GitHub Pages
             curl -s -X DELETE \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
-               https://api.github.com/repos/$TARGET_REPOSITORY/pages > /dev/null
+              https://api.github.com/repos/$TARGET_REPOSITORY/pages > /dev/null
   
             # Disable GitHub Pages
             curl -s -X PATCH \
@@ -187,14 +182,13 @@ runs:
               -H "Accept: application/vnd.github.v3+json" \
               https://api.github.com/repos/$TARGET_REPOSITORY/pages \
               -d '{"build_type":"legacy","source":null}' > /dev/null
-  
+
             # Trigger a dispaches action
             curl -s -X POST \
               -H "Authorization: token $GH_TOKEN" \
               -H "Accept: application/vnd.github.v3+json" \
-              https://api.github.com/repos/$TARGET_REPOSITORY/dispatches \
+              "https://api.github.com/repos/$TARGET_REPOSITORY/dispatches" \
               -d '{"event_type": "trigger_action", "client_payload": {"env": "prod", "version": "1.0"}}'
             echo -e "\nDispatched to https://github.com/${{ env.TARGET_REPOSITORY }}/actions"
-          fi
- 
+          fi  
         fi
